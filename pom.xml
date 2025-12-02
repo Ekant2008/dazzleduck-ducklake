@@ -7,11 +7,33 @@
     <artifactId>ducklake</artifactId>
     <version>0.0.5</version>
     <name>Dazzle Ducklake</name>
+
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <junit.version>5.8.1</junit.version>
+        <dazzleduck.vesion>0.0.13-SNAPSHOT</dazzleduck.vesion>
+    </properties>
+
     <dependencies>
         <dependency>
-            <groupId>org.duckdb</groupId>
-            <artifactId>duckdb_jdbc</artifactId>
-            <version>1.4.1.0</version>
+            <groupId>io.dazzleduck.sql</groupId>
+            <artifactId>dazzleduck-sql-flight</artifactId>
+            <version>${dazzleduck.vesion}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>
