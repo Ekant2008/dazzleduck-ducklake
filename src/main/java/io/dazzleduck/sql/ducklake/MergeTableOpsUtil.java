@@ -51,36 +51,44 @@ public class MergeTableOpsUtil {
                         List<String> toRemove) throws SQLException {
 
         try (Connection conn = ConnectionPool.getConnection()) {
-            String tempTableName = ConnectionPool.collectFirst(conn, GET_TABLE_NAME_BY_ID.formatted(mdDatabase, tempTableId), String.class);
-            for (String file : toAdd) {
-                ConnectionPool.execute(ADD_FILE_TO_TABLE_QUERY.formatted(database, tempTableName, file));
+            if (!toAdd.isEmpty()) {
+                String tempTableName = ConnectionPool.collectFirst(conn, GET_TABLE_NAME_BY_ID.formatted(mdDatabase, tempTableId), String.class);
+                for (String file : toAdd) {
+                    ConnectionPool.execute(ADD_FILE_TO_TABLE_QUERY.formatted(database, tempTableName, file));
+                }
             }
-//            ConnectionPool.execute(conn, "BEGIN TRANSACTION;");
-//            String filePaths = toRemove.stream().map(fp -> "'" + fp + "'").collect(Collectors.joining(", "));
-//            List<Long> fileIds = (List<Long>) ConnectionPool.collectFirstColumn(conn, GET_FILE_ID_BY_PATH_QUERY.formatted(mdDatabase, tableId, filePaths), Long.class);
-//            if (fileIds == null || fileIds.size() != toRemove.size()) {
-//                throw new IllegalStateException("One or more files scheduled for deletion were not found for tableId=" + tableId);
-//            }
-//            String fileIdsString = fileIds.stream().map(String::valueOf).collect(Collectors.joining(", "));
-//
-//            String updateNewFileTableId = UPDATE_TABLE_ID.formatted(mdDatabase, tableId, tempTableId);
-//            String deleteStatsQuery = DELETE_FILE_COLUMN_STATS_QUERY.formatted(mdDatabase, fileIdsString);
-//            String deletePartitionQuery = DELETE_FILE_PARTITION_VALUE_QUERY.formatted(mdDatabase, fileIdsString);
-//            String deleteFileQuery = DELETE_DATA_FILE_QUERY.formatted(mdDatabase, fileIdsString);
-//            String scheduleDeletesQuery = INSERT_INTO_SCHEDULE_FILE_DELETION_QUERY.formatted(mdDatabase, mdDatabase, fileIdsString);
-//
-//            var queries = new String[]{
-//                    scheduleDeletesQuery,    // Mark old files for deletion
-//                    updateNewFileTableId,    // Move merged file(s) to main table
-//                    deleteStatsQuery,        // Remove stats of old files
-//                    deletePartitionQuery,    // Remove partition values of old files
-//                    deleteFileQuery,         // Remove old file entries
-//                    "COMMIT"
-//            };
-//            for (String query : queries) {
-//                ConnectionPool.execute(conn, query);
-//            }
+            if (!toRemove.isEmpty()) {
+                ConnectionPool.execute(conn, "BEGIN TRANSACTION;");
+                String filePaths = toRemove.stream().map(fp -> "'" + fp + "'").collect(Collectors.joining(", "));
+                List<Long> fileIds = (List<Long>) ConnectionPool.collectFirstColumn(conn, GET_FILE_ID_BY_PATH_QUERY.formatted(mdDatabase, tableId, filePaths), Long.class);
+                if (fileIds.size() != toRemove.size()) {
+                    throw new IllegalStateException("One or more files scheduled for deletion were not found for tableId=" + tableId);
+                }
+                String fileIdsString = fileIds.stream().map(String::valueOf).collect(Collectors.joining(", "));
+
+                String updateNewFileTableId = UPDATE_TABLE_ID.formatted(mdDatabase, tableId, tempTableId);
+                var queries = getQueries(mdDatabase, fileIdsString, updateNewFileTableId);
+                for (String query : queries) {
+                    ConnectionPool.execute(conn, query);
+                }
+            }
         }
+    }
+
+    private static String[] getQueries(String mdDatabase, String fileIdsString, String updateNewFileTableId) {
+        String deleteStatsQuery = DELETE_FILE_COLUMN_STATS_QUERY.formatted(mdDatabase, fileIdsString);
+        String deletePartitionQuery = DELETE_FILE_PARTITION_VALUE_QUERY.formatted(mdDatabase, fileIdsString);
+        String deleteFileQuery = DELETE_DATA_FILE_QUERY.formatted(mdDatabase, fileIdsString);
+        String scheduleDeletesQuery = INSERT_INTO_SCHEDULE_FILE_DELETION_QUERY.formatted(mdDatabase, mdDatabase, fileIdsString);
+
+        return new String[]{
+                scheduleDeletesQuery,    // Mark old files for deletion
+                updateNewFileTableId,    // Move merged file(s) to main table
+                deleteStatsQuery,        // Remove stats of old files
+                deletePartitionQuery,    // Remove partition values of old files
+                deleteFileQuery,         // Remove old file entries
+                "COMMIT"
+        };
     }
 
     /**
