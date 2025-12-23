@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.nio.file.*;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -22,8 +23,6 @@ public class MergeTableOpsUtilTest {
     private final String CATALOG = "test_ducklake";
     private final String METADATABASE = "__ducklake_metadata_" + CATALOG;
 
-    private MergeTableOpsUtil mergeTableOpsUtil;
-
     @BeforeEach
     void setup() throws Exception {
         catalogFile = projectTempDir.resolve(CATALOG + ".ducklake");
@@ -31,7 +30,6 @@ public class MergeTableOpsUtilTest {
         Files.createDirectories(dataPath);
         String attachDB = "ATTACH 'ducklake:%s' AS %s (DATA_PATH '%s');".formatted(catalogFile.toAbsolutePath(), CATALOG, dataPath.toAbsolutePath());
         ConnectionPool.execute(attachDB);
-        mergeTableOpsUtil = new MergeTableOpsUtil();
     }
 
     @AfterEach
@@ -71,7 +69,7 @@ public class MergeTableOpsUtilTest {
             ConnectionPool.executeBatchInTxn(conn, new String[]{ADD_DATA_FILES_QUERY.formatted(CATALOG, tableName, file1), ADD_DATA_FILES_QUERY.formatted(CATALOG, tableName, file2)});
             // Method under test
             var database = CATALOG;
-            mergeTableOpsUtil.replace(CATALOG,
+            MergeTableOpsUtil.replace(CATALOG,
                     tableId,
                     tempTableId,
                     "__ducklake_metadata_" + database,
@@ -125,7 +123,7 @@ public class MergeTableOpsUtilTest {
             var database = CATALOG;
             IllegalStateException ex = assertThrows(
                     IllegalStateException.class,
-                    () -> mergeTableOpsUtil.replace( database,
+                    () -> MergeTableOpsUtil.replace( database,
                             tableId,
                             tempTableId,
                             "__ducklake_metadata_" + database,
@@ -163,12 +161,17 @@ public class MergeTableOpsUtilTest {
             
             // Capture original files
             var files = "SELECT CONCAT('%s', '%s', path) FROM %s.ducklake_data_file WHERE table_id = %s".formatted(tableDir.toString(), File.separator, METADATABASE, tableId);
-            List<String> originalFiles = (List<String>) ConnectionPool.collectFirstColumn(conn, files, String.class);
+            var ogFiles = ConnectionPool.collectFirstColumn(conn, files, String.class).iterator();
+            var originalFiles = new ArrayList<String>();
+            while (ogFiles.hasNext()) {
+                originalFiles.add(ogFiles.next());
+            }
+
             assertEquals(4, originalFiles.size(), "Expected 4 original parquet files");
 
-            Path baseLocation = tableDir.resolve("rewrite");
+            Path baseLocation = tableDir.resolve("rewritebb6031f9-e275-49ea-b575-ee604ea6f04f");
             Files.createDirectories(baseLocation);
-            List<String> newFiles = mergeTableOpsUtil.rewriteWithPartitionNoCommit(
+            List<String> newFiles = MergeTableOpsUtil.rewriteWithPartitionNoCommit(
                     originalFiles,
                     baseLocation.toString(),
                     List.of("created_at", "category")
@@ -206,12 +209,16 @@ public class MergeTableOpsUtilTest {
             ConnectionPool.executeBatchInTxn(conn, inserts);
 
             Long tableId = ConnectionPool.collectFirst("SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'".formatted(METADATABASE, tableName), Long.class);
-            List<String> originalFiles = (List<String>) ConnectionPool.collectFirstColumn(conn, "SELECT CONCAT('%s', '%s', path) FROM %s.ducklake_data_file WHERE table_id=%s".formatted(tableDir.toString(), File.separator, METADATABASE, tableId), String.class);
+            var of = ConnectionPool.collectFirstColumn(conn, "SELECT CONCAT('%s', '%s', path) FROM %s.ducklake_data_file WHERE table_id=%s".formatted(tableDir.toString(), File.separator, METADATABASE, tableId), String.class).iterator();
+            var originalFiles = new ArrayList<String>();
+            while (of.hasNext()) {
+                originalFiles.add(of.next());
+            }
             assertEquals(4, originalFiles.size(), "Expected 4 parquet files");
 
             Path baseLocation = tableDir.resolve("rewrite");
             Files.createDirectories(baseLocation);
-            List<String> newFiles = mergeTableOpsUtil.rewriteWithPartitionNoCommit(
+            List<String> newFiles = MergeTableOpsUtil.rewriteWithPartitionNoCommit(
                     originalFiles,
                     baseLocation.resolve("merged.parquet").toString(),
                     List.of() // EMPTY PARTITION

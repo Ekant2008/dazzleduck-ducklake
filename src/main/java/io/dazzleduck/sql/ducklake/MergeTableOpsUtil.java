@@ -1,5 +1,7 @@
 package io.dazzleduck.sql.ducklake;
 
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -60,7 +62,11 @@ public class MergeTableOpsUtil {
             if (!toRemove.isEmpty()) {
                 ConnectionPool.execute(conn, "BEGIN TRANSACTION;");
                 String filePaths = toRemove.stream().map(fp -> "'" + fp + "'").collect(Collectors.joining(", "));
-                List<Long> fileIds = (List<Long>) ConnectionPool.collectFirstColumn(conn, GET_FILE_ID_BY_PATH_QUERY.formatted(mdDatabase, tableId, filePaths), Long.class);
+                var t = ConnectionPool.collectFirstColumn(conn, GET_FILE_ID_BY_PATH_QUERY.formatted(mdDatabase, tableId, filePaths), Long.class).iterator();
+                var fileIds = new ArrayList<Long>();
+                while (t.hasNext()) {
+                    fileIds.add(t.next());
+                }
                 if (fileIds.size() != toRemove.size()) {
                     throw new IllegalStateException("One or more files scheduled for deletion were not found for tableId=" + tableId);
                 }
@@ -106,15 +112,40 @@ public class MergeTableOpsUtil {
                                                      List<String> partition) throws SQLException {
         try (Connection conn = ConnectionPool.getConnection()) {
             String sources = inputFiles.stream().map(s -> "'" + s + "'").collect(Collectors.joining(","));
-            String partitionClause = partition.isEmpty() ? "" : "PARTITION_BY (" + String.join(", ", partition) + "),";
-            String copyQuery = COPY_TO_NEW_FILE_WITH_PARTITION_QUERY.formatted(sources, baseLocation, partitionClause);
-
-            List<String> files = new ArrayList<>();
-            for (CopyResult r : ConnectionPool.collectAll(conn, copyQuery, CopyResult.class)) {
-                files.addAll(Arrays.stream(r.files()).map(Object::toString).toList());
-            }
-            return files;
+            return getStrings(sources, baseLocation, partition, conn);
         }
+    }
+
+    /**
+     *
+     * @param inputFile input file..
+     * @param partition
+     * @return the list of newly created files. Note this will not update the metadata. It needs to be combined with replace function to make this changes visible to the table.
+     *
+     * input -> /data/log/a, /data/log/b
+     * baseLocation -> /data/log
+     * partition -> List.Of('date', applicationid).
+     */
+    public static List<String> rewriteWithPartitionNoCommit(String inputFile,
+                                                            String baseLocation,
+                                                            List<String> partition) throws SQLException {
+        try (Connection conn = ConnectionPool.getConnection()) {
+            Path p = Paths.get(inputFile);
+            Path fileName = p.getFileName();
+            var targetPath = baseLocation + fileName.toString();
+            return getStrings("'" + inputFile + "'", targetPath, partition, conn);
+        }
+    }
+
+    private static List<String> getStrings(String inputFile, String baseLocation, List<String> partition, Connection conn) {
+        String partitionClause = partition.isEmpty() ? "" : "PARTITION_BY (" + String.join(", ", partition) + "),";
+        String copyQuery = COPY_TO_NEW_FILE_WITH_PARTITION_QUERY.formatted(inputFile, baseLocation, partitionClause);
+
+        List<String> files = new ArrayList<>();
+        for (CopyResult r : ConnectionPool.collectAll(conn, copyQuery, CopyResult.class)) {
+            files.addAll(Arrays.stream(r.files()).map(Object::toString).toList());
+        }
+        return files;
     }
 
     /**
