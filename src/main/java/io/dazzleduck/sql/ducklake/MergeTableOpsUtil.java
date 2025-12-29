@@ -51,6 +51,18 @@ public class MergeTableOpsUtil {
                         String mdDatabase,
                         List<String> toAdd,
                         List<String> toRemove) throws SQLException {
+        if (database == null || database.isBlank()) {
+            throw new IllegalArgumentException("database cannot be null or blank");
+        }
+        if (mdDatabase == null || mdDatabase.isBlank()) {
+            throw new IllegalArgumentException("mdDatabase cannot be null or blank");
+        }
+        if (toAdd == null) {
+            throw new IllegalArgumentException("toAdd cannot be null");
+        }
+        if (toRemove == null) {
+            throw new IllegalArgumentException("toRemove cannot be null");
+        }
 
         try (Connection conn = ConnectionPool.getConnection()) {
             if (!toAdd.isEmpty()) {
@@ -60,22 +72,31 @@ public class MergeTableOpsUtil {
                 }
             }
             if (!toRemove.isEmpty()) {
-                ConnectionPool.execute(conn, "BEGIN TRANSACTION;");
-                String filePaths = toRemove.stream().map(fp -> "'" + fp + "'").collect(Collectors.joining(", "));
-                var t = ConnectionPool.collectFirstColumn(conn, GET_FILE_ID_BY_PATH_QUERY.formatted(mdDatabase, tableId, filePaths), Long.class).iterator();
-                var fileIds = new ArrayList<Long>();
-                while (t.hasNext()) {
-                    fileIds.add(t.next());
-                }
-                if (fileIds.size() != toRemove.size()) {
-                    throw new IllegalStateException("One or more files scheduled for deletion were not found for tableId=" + tableId);
-                }
-                String fileIdsString = fileIds.stream().map(String::valueOf).collect(Collectors.joining(", "));
+                boolean transactionStarted = false;
+                try {
+                    ConnectionPool.execute(conn, "BEGIN TRANSACTION;");
+                    transactionStarted = true;
+                    String filePaths = toRemove.stream().map(fp -> "'" + fp + "'").collect(Collectors.joining(", "));
+                    var t = ConnectionPool.collectFirstColumn(conn, GET_FILE_ID_BY_PATH_QUERY.formatted(mdDatabase, tableId, filePaths), Long.class).iterator();
+                    var fileIds = new ArrayList<Long>();
+                    while (t.hasNext()) {
+                        fileIds.add(t.next());
+                    }
+                    if (fileIds.size() != toRemove.size()) {
+                        throw new IllegalStateException("One or more files scheduled for deletion were not found for tableId=" + tableId);
+                    }
+                    String fileIdsString = fileIds.stream().map(String::valueOf).collect(Collectors.joining(", "));
 
-                String updateNewFileTableId = UPDATE_TABLE_ID.formatted(mdDatabase, tableId, tempTableId);
-                var queries = getQueries(mdDatabase, fileIdsString, updateNewFileTableId);
-                for (String query : queries) {
-                    ConnectionPool.execute(conn, query);
+                    String updateNewFileTableId = UPDATE_TABLE_ID.formatted(mdDatabase, tableId, tempTableId);
+                    var queries = getQueries(mdDatabase, fileIdsString, updateNewFileTableId);
+                    for (String query : queries) {
+                        ConnectionPool.execute(conn, query);
+                    }
+                } catch (Exception e) {
+                    if (transactionStarted) {
+                        ConnectionPool.execute(conn, "ROLLBACK;");
+                    }
+                    throw e;
                 }
             }
         }
@@ -110,6 +131,15 @@ public class MergeTableOpsUtil {
     public static List<String> rewriteWithPartitionNoCommit(List<String> inputFiles,
                                                      String baseLocation,
                                                      List<String> partition) throws SQLException {
+        if (inputFiles == null || inputFiles.isEmpty()) {
+            throw new IllegalArgumentException("inputFiles cannot be null or empty");
+        }
+        if (baseLocation == null || baseLocation.isBlank()) {
+            throw new IllegalArgumentException("baseLocation cannot be null or blank");
+        }
+        if (partition == null) {
+            throw new IllegalArgumentException("partition cannot be null");
+        }
         try (Connection conn = ConnectionPool.getConnection()) {
             String sources = inputFiles.stream().map(s -> "'" + s + "'").collect(Collectors.joining(","));
             return getStrings(sources, baseLocation, partition, conn);
@@ -129,6 +159,15 @@ public class MergeTableOpsUtil {
     public static List<String> rewriteWithPartitionNoCommit(String inputFile,
                                                             String baseLocation,
                                                             List<String> partition) throws SQLException {
+        if (inputFile == null || inputFile.isBlank()) {
+            throw new IllegalArgumentException("inputFile cannot be null or blank");
+        }
+        if (baseLocation == null || baseLocation.isBlank()) {
+            throw new IllegalArgumentException("baseLocation cannot be null or blank");
+        }
+        if (partition == null) {
+            throw new IllegalArgumentException("partition cannot be null");
+        }
         try (Connection conn = ConnectionPool.getConnection()) {
             Path p = Paths.get(inputFile);
             Path fileName = p.getFileName();
@@ -162,7 +201,16 @@ public class MergeTableOpsUtil {
     public static List<FileStatus> listFiles(String mdDatabase,
                                              String catalog,
                                              long minSize,
-                                             long maxSize) throws RuntimeException, SQLException {
+                                             long maxSize) throws SQLException {
+        if (mdDatabase == null || mdDatabase.isBlank()) {
+            throw new IllegalArgumentException("mdDatabase cannot be null or blank");
+        }
+        if (minSize < 0) {
+            throw new IllegalArgumentException("minSize cannot be negative");
+        }
+        if (maxSize < minSize) {
+            throw new IllegalArgumentException("maxSize cannot be less than minSize");
+        }
         List<FileStatus> filesToCompact = new ArrayList<>();
         String selectQuery = SELECT_DUCKLAKE_DATA_FILES_QUERY.formatted(mdDatabase, minSize, maxSize);
         try (Connection conn = ConnectionPool.getConnection()){
