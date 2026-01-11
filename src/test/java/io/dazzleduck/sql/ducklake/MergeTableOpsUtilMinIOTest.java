@@ -399,10 +399,14 @@ public class MergeTableOpsUtilMinIOTest {
             };
             ConnectionPool.executeBatchInTxn(conn, setup);
 
+            // Get table ID
+            String GET_TABLE_ID_QUERY = "SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'";
+            Long tableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID_QUERY.formatted(metadatabase, tableName), Long.class);
+
             // List files in size range
             List<FileStatus> files = MergeTableOpsUtil.listFiles(
                     metadatabase,
-                    catalogName,
+                    tableId,
                     100L,
                     100000L
             );

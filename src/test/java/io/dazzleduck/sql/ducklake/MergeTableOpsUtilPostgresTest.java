@@ -301,10 +301,14 @@ public class MergeTableOpsUtilPostgresTest {
             };
             ConnectionPool.executeBatchInTxn(conn, setup);
 
+            // Get table ID
+            String GET_TABLE_ID_QUERY = "SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'";
+            Long tableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID_QUERY.formatted(metadataDb, tableName), Long.class);
+
             // List files from PostgreSQL metadata
             var files = MergeTableOpsUtil.listFiles(
                     metadataDb,
-                    catalog,
+                    tableId,
                     100L,
                     1_000_000L
             );
@@ -440,22 +444,22 @@ public class MergeTableOpsUtilPostgresTest {
     void testListFilesInvalidArguments() {
         // Test invalid arguments for listFiles
         assertThrows(IllegalArgumentException.class, () ->
-                        MergeTableOpsUtil.listFiles(null, "catalog", 0L, 1000L),
+                        MergeTableOpsUtil.listFiles(null, 1L, 0L, 1000L),
                 "Null metadata database should throw exception"
         );
 
         assertThrows(IllegalArgumentException.class, () ->
-                        MergeTableOpsUtil.listFiles("", "catalog", 0L, 1000L),
+                        MergeTableOpsUtil.listFiles("", 1L, 0L, 1000L),
                 "Blank metadata database should throw exception"
         );
 
         assertThrows(IllegalArgumentException.class, () ->
-                        MergeTableOpsUtil.listFiles("md", "catalog", -1L, 1000L),
+                        MergeTableOpsUtil.listFiles("md", 1L, -1L, 1000L),
                 "Negative minSize should throw exception"
         );
 
         assertThrows(IllegalArgumentException.class, () ->
-                        MergeTableOpsUtil.listFiles("md", "catalog", 1000L, 500L),
+                        MergeTableOpsUtil.listFiles("md", 1L, 1000L, 500L),
                 "maxSize less than minSize should throw exception"
         );
     }
