@@ -69,6 +69,78 @@ public class MergeTableOpsUtilTest {
             ConnectionPool.executeBatchInTxn(conn, new String[]{ADD_DATA_FILES_QUERY.formatted(CATALOG, tableName, file1), ADD_DATA_FILES_QUERY.formatted(CATALOG, tableName, file2)});
             // Method under test
             var database = CATALOG;
+            long snapshotId = MergeTableOpsUtil.replace(CATALOG,
+                    tableId,
+                    tempTableId,
+                    "__ducklake_metadata_" + database,
+                    List.of(file3.toString(), file4.toString()),
+                    List.of(file1.getFileName().toString(), file2.getFileName().toString())
+            );
+
+            assertTrue(snapshotId > 0, "Should return valid snapshot ID");
+
+            try (var connection = ConnectionPool.getConnection()) {
+                // Validate new files exist with end_snapshot = NULL (active)
+                Long newFileCount = ConnectionPool.collectFirst(connection,
+                        "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE (path LIKE '%%%s%%' OR path LIKE '%%%s%%') AND end_snapshot IS NULL"
+                                .formatted(METADATABASE, file3.getFileName(), file4.getFileName()), Long.class);
+                assertEquals(2, newFileCount, "Expected newly created files to be registered as active");
+
+                // Old files should have end_snapshot set (not deleted)
+                Long oldFilesWithEndSnapshot = ConnectionPool.collectFirst(connection,
+                        "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE (path LIKE '%%%s%%' OR path LIKE '%%%s%%') AND end_snapshot = %s"
+                                .formatted(METADATABASE, file1.getFileName(), file2.getFileName(), snapshotId), Long.class);
+                assertEquals(2, oldFilesWithEndSnapshot, "Old files should have end_snapshot set");
+
+                // Files should NOT be scheduled for deletion yet (need expire_snapshots)
+                Long scheduled = ConnectionPool.collectFirst(connection, "SELECT COUNT(*) FROM %s.ducklake_files_scheduled_for_deletion".formatted(METADATABASE), Long.class);
+                assertEquals(0, scheduled, "Files should NOT be scheduled for deletion until expire_snapshots is called");
+            }
+        }
+    }
+
+    @Test
+    void testReplaceTempTableFileCountUnchanged() throws Exception {
+        String tableName = "products";
+        Path tableDir = dataPath.resolve("main").resolve(tableName);
+        Files.createDirectories(tableDir);
+        Path file1 = tableDir.resolve("file1.parquet");
+        Path file2 = tableDir.resolve("file2.parquet");
+        Path file3 = tableDir.resolve("file3.parquet");
+        Path file4 = tableDir.resolve("file4.parquet");
+
+        try (Connection conn = ConnectionPool.getConnection()) {
+            String[] setup = {
+                    "USE " + CATALOG,
+                    "CREATE TABLE %s AS SELECT * FROM (VALUES (1,'A'),(2,'B')) t(id,name)".formatted(tableName),
+                    "COPY (SELECT 1 AS id, 'A' AS name) TO '%s' (FORMAT PARQUET)".formatted(file1),
+                    "COPY (SELECT 2 AS id, 'B' AS name) TO '%s' (FORMAT PARQUET)".formatted(file2),
+                    "COPY (SELECT 3 AS id, 'C' AS name) TO '%s' (FORMAT PARQUET)".formatted(file3),
+                    "COPY (SELECT 4 AS id, 'D' AS name) TO '%s' (FORMAT PARQUET)".formatted(file4)
+            };
+            ConnectionPool.executeBatchInTxn(conn, setup);
+
+            String GET_TABLE_ID_QUERY = "SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'";
+            Long tableId = ConnectionPool.collectFirst(GET_TABLE_ID_QUERY.formatted(METADATABASE, tableName), Long.class);
+
+            // Create temp dummy table
+            String dummyTable = "__dummy_" + tableId;
+            ConnectionPool.execute("CREATE OR REPLACE TABLE %s.%s AS SELECT * FROM %s.%s LIMIT 0".formatted(CATALOG, dummyTable, CATALOG, tableName));
+            Long tempTableId = ConnectionPool.collectFirst(GET_TABLE_ID_QUERY.formatted(METADATABASE, dummyTable), Long.class);
+
+            // Register file1 & file2 as original files in main table
+            String ADD_DATA_FILES_QUERY = "CALL ducklake_add_data_files('%s','%s','%s')";
+            ConnectionPool.executeBatchInTxn(conn, new String[]{
+                    ADD_DATA_FILES_QUERY.formatted(CATALOG, tableName, file1),
+                    ADD_DATA_FILES_QUERY.formatted(CATALOG, tableName, file2)
+            });
+
+            // Count files in temp table BEFORE replace
+            Long tempTableFileCountBefore = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE table_id = %s".formatted(METADATABASE, tempTableId), Long.class);
+
+            // Call replace - this adds files to temp table then moves them to main table
+            var database = CATALOG;
             MergeTableOpsUtil.replace(CATALOG,
                     tableId,
                     tempTableId,
@@ -76,19 +148,13 @@ public class MergeTableOpsUtilTest {
                     List.of(file3.toString(), file4.toString()),
                     List.of(file1.getFileName().toString(), file2.getFileName().toString())
             );
-            try (var connection = ConnectionPool.getConnection()) {
-                // Validate new file exists
-                Long newFileCount = ConnectionPool.collectFirst(connection, "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE path LIKE '%%%s%%' OR path LIKE '%%%s%%'".formatted(METADATABASE, file3.getFileName(), file4.getFileName()), Long.class);
-                // should be 2 (file3 and file4)
-                assertEquals(2, newFileCount, "Expected newly created file to be registered");
-                String oldCountSql = "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE path LIKE '%%%s%%' OR path LIKE '%%%s%%'".formatted(METADATABASE, file1.getFileName(), file2.getFileName());
-                // Old files removed
-                Long oldCount = ConnectionPool.collectFirst(connection, oldCountSql, Long.class);
-                assertEquals(0, oldCount, "Old files must be removed from metadata");
-                // Deleted scheduled
-                Long scheduled = ConnectionPool.collectFirst(connection, "SELECT COUNT(*) FROM %s.ducklake_files_scheduled_for_deletion".formatted(METADATABASE), Long.class);
-                assertEquals(2, scheduled, "Expected both files scheduled for deletion");
-            }
+
+            // Count files in temp table AFTER replace
+            Long tempTableFileCountAfter = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE table_id = %s".formatted(METADATABASE, tempTableId), Long.class);
+
+            assertEquals(tempTableFileCountBefore, tempTableFileCountAfter,
+                    "Temp table should have same number of files after replace as before (files should be moved to main table)");
         }
     }
 
@@ -240,5 +306,11 @@ public class MergeTableOpsUtilTest {
             assertEquals(4L, afterFileCount, "No commit should modify metadata");
         }
     }
+
+    // NOTE: deleteDirectlyFromMetadata() tests are skipped because DucklakePartitionPruning.pruneFiles()
+    // only works with files that have partition directory structure in their paths.
+    // Files created by normal INSERT statements don't have this structure,
+    // only files created by rewriteWithPartitionNoCommit() have partition paths like
+    // "category=sales/data_0.parquet".
 
 }

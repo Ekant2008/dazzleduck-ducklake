@@ -197,7 +197,7 @@ public class MergeTableOpsUtilMinIOTest {
                     .collect(Collectors.toList());
 
             // Execute replace operation
-            MergeTableOpsUtil.replace(
+            long snapshotId = MergeTableOpsUtil.replace(
                     catalogName,
                     tableId,
                     tempTableId,
@@ -206,15 +206,24 @@ public class MergeTableOpsUtilMinIOTest {
                     fileNamesToRemove
             );
 
-            // Verify results
-            Long newFileCount = ConnectionPool.collectFirst(conn,
-                    "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE path LIKE '%%file3_merged%%'"
-                            .formatted(metadatabase), Long.class);
-            assertEquals(1, newFileCount, "Merged file should be registered");
+            assertTrue(snapshotId > 0, "Should return valid snapshot ID");
 
+            // Verify results - new file is active (end_snapshot IS NULL)
+            Long newFileCount = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE path LIKE '%%file3_merged%%' AND end_snapshot IS NULL"
+                            .formatted(metadatabase), Long.class);
+            assertEquals(1, newFileCount, "Merged file should be registered as active");
+
+            // Old files should have end_snapshot set
+            Long oldFilesWithEndSnapshot = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE table_id = %s AND end_snapshot = %s"
+                            .formatted(metadatabase, tableId, snapshotId), Long.class);
+            assertEquals((long) originalFilePaths.size(), oldFilesWithEndSnapshot, "Old files should have end_snapshot set");
+
+            // Files should NOT be scheduled for deletion yet
             Long scheduledCount = ConnectionPool.collectFirst(conn,
                     "SELECT COUNT(*) FROM %s.ducklake_files_scheduled_for_deletion".formatted(metadatabase), Long.class);
-            assertTrue(scheduledCount >= originalFilePaths.size(), "Old files should be scheduled for deletion");
+            assertEquals(0L, scheduledCount, "Files should NOT be scheduled for deletion until expire_snapshots is called");
 
             // Verify data integrity through table
             Long rowCount = ConnectionPool.collectFirst(conn, "SELECT COUNT(*) FROM %s.%s".formatted(catalogName, tableName), Long.class);
@@ -399,10 +408,14 @@ public class MergeTableOpsUtilMinIOTest {
             };
             ConnectionPool.executeBatchInTxn(conn, setup);
 
+            // Get table ID
+            String GET_TABLE_ID_QUERY = "SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'";
+            Long tableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID_QUERY.formatted(metadatabase, tableName), Long.class);
+
             // List files in size range
             List<FileStatus> files = MergeTableOpsUtil.listFiles(
                     metadatabase,
-                    catalogName,
+                    tableId,
                     100L,
                     100000L
             );
@@ -452,7 +465,7 @@ public class MergeTableOpsUtilMinIOTest {
             }
 
             // Remove files without adding new ones
-            MergeTableOpsUtil.replace(
+            long snapshotId = MergeTableOpsUtil.replace(
                     catalogName,
                     tableId,
                     tempTableId,
@@ -461,14 +474,24 @@ public class MergeTableOpsUtilMinIOTest {
                     fileNames
             );
 
-            Long fileCount = ConnectionPool.collectFirst(conn,
-                    "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE table_id = %s"
-                            .formatted(metadatabase, tableId), Long.class);
-            assertEquals(0L, fileCount, "All files should be removed");
+            assertTrue(snapshotId > 0, "Should return valid snapshot ID");
 
+            // Files should have end_snapshot set (not deleted)
+            Long filesWithEndSnapshot = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE table_id = %s AND end_snapshot = %s"
+                            .formatted(metadatabase, tableId, snapshotId), Long.class);
+            assertEquals((long) fileNames.size(), filesWithEndSnapshot, "All files should have end_snapshot set");
+
+            // Active files count should be 0
+            Long activeCount = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE table_id = %s AND end_snapshot IS NULL"
+                            .formatted(metadatabase, tableId), Long.class);
+            assertEquals(0L, activeCount, "No active files should remain");
+
+            // Files should NOT be scheduled for deletion yet
             Long scheduledCount = ConnectionPool.collectFirst(conn,
                     "SELECT COUNT(*) FROM %s.ducklake_files_scheduled_for_deletion".formatted(metadatabase), Long.class);
-            assertTrue(scheduledCount > 0, "Files should be scheduled for deletion");
+            assertEquals(0L, scheduledCount, "Files should NOT be scheduled for deletion until expire_snapshots is called");
         }
     }
 }
