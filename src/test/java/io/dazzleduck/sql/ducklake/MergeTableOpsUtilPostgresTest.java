@@ -80,12 +80,6 @@ public class MergeTableOpsUtilPostgresTest {
             Long tableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadataDb, tableName), Long.class);
             assertNotNull(tableId, "Table ID should not be null");
 
-            // Create temp (dummy) table
-            String dummyTable = "__dummy_" + tableId;
-            ConnectionPool.execute(conn, "CREATE OR REPLACE TABLE %s.%s AS SELECT * FROM %s.%s LIMIT 0".formatted(catalog, dummyTable, catalog, tableName));
-
-            Long tempTableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadataDb, dummyTable), Long.class);
-
             // Get original file paths from PostgreSQL metadata
             var filePathsIt = ConnectionPool.collectFirstColumn(conn, "SELECT path FROM %s.ducklake_data_file WHERE table_id = %s".formatted(metadataDb, tableId), String.class).iterator();
 
@@ -113,7 +107,6 @@ public class MergeTableOpsUtilPostgresTest {
             long snapshotId = MergeTableOpsUtil.replace(
                     catalog,
                     tableId,
-                    tempTableId,
                     metadataDb,
                     List.of(mergedFile.toString()),
                     fileNamesToRemove
@@ -156,11 +149,6 @@ public class MergeTableOpsUtilPostgresTest {
             String GET_TABLE_ID = "SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'";
             Long tableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadataDb, tableName), Long.class);
 
-            String dummyTable = "__dummy_" + tableId;
-            ConnectionPool.execute(conn, "CREATE OR REPLACE TABLE %s.%s AS SELECT * FROM %s.%s LIMIT 0".formatted(catalog, dummyTable, catalog, tableName));
-
-            Long tempTableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadataDb, dummyTable), Long.class);
-
             // Get existing file from PostgreSQL metadata
             var fileIt = ConnectionPool.collectFirstColumn(conn, "SELECT path FROM %s.ducklake_data_file WHERE table_id = %s".formatted(metadataDb, tableId), String.class).iterator();
 
@@ -192,7 +180,6 @@ public class MergeTableOpsUtilPostgresTest {
                     () -> MergeTableOpsUtil.replace(
                             catalog,
                             tableId,
-                            tempTableId,
                             metadataDb,
                             List.of(mergedFile.toString()),
                             List.of(finalExistingFileName, "does_not_exist.parquet")
@@ -346,11 +333,6 @@ public class MergeTableOpsUtilPostgresTest {
             String GET_TABLE_ID = "SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'";
             Long tableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadataDb, tableName), Long.class);
 
-            String dummy = "__dummy_" + tableId;
-            ConnectionPool.execute(conn, "CREATE OR REPLACE TABLE %s.%s AS SELECT * FROM %s.%s LIMIT 0".formatted(catalog, dummy, catalog, tableName));
-
-            Long tempTableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadataDb, dummy), Long.class);
-
             // Get file paths from PostgreSQL metadata
             var it = ConnectionPool.collectFirstColumn(conn, "SELECT path FROM %s.ducklake_data_file WHERE table_id = %s".formatted(metadataDb, tableId), String.class).iterator();
 
@@ -364,7 +346,6 @@ public class MergeTableOpsUtilPostgresTest {
             long snapshotId = MergeTableOpsUtil.replace(
                     catalog,
                     tableId,
-                    tempTableId,
                     metadataDb,
                     List.of(), // Empty add list
                     names
@@ -393,32 +374,32 @@ public class MergeTableOpsUtilPostgresTest {
     void testReplaceWithNullArguments() {
         // Test all invalid argument combinations
         assertThrows(IllegalArgumentException.class, () ->
-                        MergeTableOpsUtil.replace(null, 1L, 2L, "md", List.of(), List.of()),
+                        MergeTableOpsUtil.replace(null, 1L, "md", List.of(), List.of()),
                 "Null database should throw exception"
         );
 
         assertThrows(IllegalArgumentException.class, () ->
-                        MergeTableOpsUtil.replace("", 1L, 2L, "md", List.of(), List.of()),
+                        MergeTableOpsUtil.replace("", 1L, "md", List.of(), List.of()),
                 "Blank database should throw exception"
         );
 
         assertThrows(IllegalArgumentException.class, () ->
-                        MergeTableOpsUtil.replace("db", 1L, 2L, null, List.of(), List.of()),
+                        MergeTableOpsUtil.replace("db", 1L, null, List.of(), List.of()),
                 "Null metadata database should throw exception"
         );
 
         assertThrows(IllegalArgumentException.class, () ->
-                        MergeTableOpsUtil.replace("db", 1L, 2L, "", List.of(), List.of()),
+                        MergeTableOpsUtil.replace("db", 1L, "", List.of(), List.of()),
                 "Blank metadata database should throw exception"
         );
 
         assertThrows(IllegalArgumentException.class, () ->
-                        MergeTableOpsUtil.replace("db", 1L, 2L, "md", null, List.of()),
+                        MergeTableOpsUtil.replace("db", 1L, "md", null, List.of()),
                 "Null toAdd list should throw exception"
         );
 
         assertThrows(IllegalArgumentException.class, () ->
-                        MergeTableOpsUtil.replace("db", 1L, 2L, "md", List.of(), null),
+                        MergeTableOpsUtil.replace("db", 1L, "md", List.of(), null),
                 "Null toRemove list should throw exception"
         );
     }
@@ -494,11 +475,6 @@ public class MergeTableOpsUtilPostgresTest {
             String GET_TABLE_ID = "SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'";
             Long tableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadataDb, tableName), Long.class);
 
-            String dummyTable = "__dummy_" + tableId;
-            ConnectionPool.execute(conn, "CREATE OR REPLACE TABLE %s.%s AS SELECT * FROM %s.%s LIMIT 0".formatted(catalog, dummyTable, catalog, tableName));
-
-            Long tempTableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadataDb, dummyTable), Long.class);
-
             // Count files before failed operation
             Long beforeCount = ConnectionPool.collectFirst(conn, "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE table_id = %s".formatted(metadataDb, tableId), Long.class);
 
@@ -512,7 +488,6 @@ public class MergeTableOpsUtilPostgresTest {
                 MergeTableOpsUtil.replace(
                         catalog,
                         tableId,
-                        tempTableId,
                         metadataDb,
                         List.of(newFile.toString()),
                         List.of("existing.parquet", "nonexistent.parquet")

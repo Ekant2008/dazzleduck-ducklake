@@ -16,7 +16,7 @@
         <testcontainers.version>1.21.4</testcontainers.version>
         <aws-sdk.version>2.20.160</aws-sdk.version>
         <jackson.version>2.15.3</jackson.version>
-        <dazzleduck.version>0.0.13-SNAPSHOT</dazzleduck.version>
+        <dazzleduck.version>0.0.19</dazzleduck.version>
     </properties>
 
     <dependencyManagement>
@@ -45,7 +45,7 @@
         <dependency>
             <groupId>io.dazzleduck.sql</groupId>
             <artifactId>dazzleduck-sql-commons</artifactId>
-            <version>0.0.13-SNAPSHOT</version>
+            <version>${dazzleduck.version}</version>
         </dependency>
 
         <!-- JUnit 5 -->

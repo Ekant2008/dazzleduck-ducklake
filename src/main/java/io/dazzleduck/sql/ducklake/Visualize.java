@@ -212,16 +212,6 @@ public class Visualize {
                 }
                 System.out.println("\nActive files before replace: " + activeFiles.size());
 
-                // Create a temp table with same schema for the replace operation
-                String tempTableName = "__temp_replace_" + tableId;
-                ConnectionPool.execute(conn,
-                    "CREATE OR REPLACE TABLE %s.%s AS SELECT * FROM %s.%s LIMIT 0"
-                            .formatted(CATALOG, tempTableName, CATALOG, TABLE_NAME));
-                Long tempTableId = ConnectionPool.collectFirst(conn,
-                        "SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'"
-                                .formatted(METADATABASE, tempTableName), Long.class);
-                System.out.println("Created temp table: " + tempTableName + " (id=" + tempTableId + ")");
-
                 // Create a new merged parquet file using rewriteWithPartitionNoCommit
                 // This merges all active files into one file partitioned by category
                 Path mergeOutput = mergeDir.resolve("merged/");
@@ -249,7 +239,6 @@ public class Visualize {
                 long replaceSnapshotId = MergeTableOpsUtil.replace(
                         CATALOG,
                         tableId,
-                        tempTableId,
                         METADATABASE,
                         newFiles,          // Files to add
                         activeFiles        // Files to remove (mark with end_snapshot)

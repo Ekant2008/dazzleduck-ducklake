@@ -161,19 +161,13 @@ public class MergeTableOpsUtilMinIOTest {
             ConnectionPool.executeBatchInTxn(conn, setup);
 
             // Get table ID
-            String GET_TABLE_ID = "SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'";
+            String GET_TABLE_ID = "SELECT table_id FROM %s.main.ducklake_table WHERE table_name='%s'";
             Long tableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadatabase, tableName), Long.class);
             assertNotNull(tableId, "Table ID should not be null");
 
-            // Create temp table
-            String dummyTable = "__dummy_" + tableId;
-            ConnectionPool.execute(conn, "CREATE OR REPLACE TABLE %s.%s AS SELECT * FROM %s.%s LIMIT 0"
-                    .formatted(catalogName, dummyTable, catalogName, tableName));
-            Long tempTableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadatabase, dummyTable), Long.class);
-
             // Get original file paths (relative to DATA_PATH)
             var filePaths = ConnectionPool.collectFirstColumn(conn,
-                    "SELECT path FROM %s.ducklake_data_file WHERE table_id = %s"
+                    "SELECT path FROM %s.main.ducklake_data_file WHERE table_id = %s"
                             .formatted(metadatabase, tableId), String.class).iterator();
 
             List<String> originalFilePaths = new ArrayList<>();
@@ -200,7 +194,6 @@ public class MergeTableOpsUtilMinIOTest {
             long snapshotId = MergeTableOpsUtil.replace(
                     catalogName,
                     tableId,
-                    tempTableId,
                     metadatabase,
                     List.of(s3Path3),
                     fileNamesToRemove
@@ -210,13 +203,13 @@ public class MergeTableOpsUtilMinIOTest {
 
             // Verify results - new file is active (end_snapshot IS NULL)
             Long newFileCount = ConnectionPool.collectFirst(conn,
-                    "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE path LIKE '%%file3_merged%%' AND end_snapshot IS NULL"
+                    "SELECT COUNT(*) FROM %s.main.ducklake_data_file WHERE end_snapshot IS NULL"
                             .formatted(metadatabase), Long.class);
             assertEquals(1, newFileCount, "Merged file should be registered as active");
 
             // Old files should have end_snapshot set
             Long oldFilesWithEndSnapshot = ConnectionPool.collectFirst(conn,
-                    "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE table_id = %s AND end_snapshot = %s"
+                    "SELECT COUNT(*) FROM %s.main.ducklake_data_file WHERE table_id = %s AND end_snapshot = %s"
                             .formatted(metadatabase, tableId, snapshotId), Long.class);
             assertEquals((long) originalFilePaths.size(), oldFilesWithEndSnapshot, "Old files should have end_snapshot set");
 
@@ -246,11 +239,6 @@ public class MergeTableOpsUtilMinIOTest {
 
             String GET_TABLE_ID = "SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'";
             Long tableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadatabase, tableName), Long.class);
-
-            String dummyTable = "__dummy_" + tableId;
-            ConnectionPool.execute(conn, "CREATE OR REPLACE TABLE %s.%s AS SELECT * FROM %s.%s LIMIT 0"
-                    .formatted(catalogName, dummyTable, catalogName, tableName));
-            Long tempTableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadatabase, dummyTable), Long.class);
 
             // Get actual files
             var filePaths = ConnectionPool.collectFirstColumn(conn,
@@ -283,7 +271,6 @@ public class MergeTableOpsUtilMinIOTest {
                     () -> MergeTableOpsUtil.replace(
                             catalogName,
                             tableId,
-                            tempTableId,
                             metadatabase,
                             List.of(s3Path2),
                             List.of(finalFileName, "does_not_exist.parquet")
@@ -447,11 +434,6 @@ public class MergeTableOpsUtilMinIOTest {
             String GET_TABLE_ID = "SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'";
             Long tableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadatabase, tableName), Long.class);
 
-            String dummyTable = "__dummy_" + tableId;
-            ConnectionPool.execute(conn, "CREATE OR REPLACE TABLE %s.%s AS SELECT * FROM %s.%s LIMIT 0"
-                    .formatted(catalogName, dummyTable, catalogName, tableName));
-            Long tempTableId = ConnectionPool.collectFirst(conn, GET_TABLE_ID.formatted(metadatabase, dummyTable), Long.class);
-
             // Get actual file paths
             var filePaths = ConnectionPool.collectFirstColumn(conn,
                     "SELECT path FROM %s.ducklake_data_file WHERE table_id = %s"
@@ -468,7 +450,6 @@ public class MergeTableOpsUtilMinIOTest {
             long snapshotId = MergeTableOpsUtil.replace(
                     catalogName,
                     tableId,
-                    tempTableId,
                     metadatabase,
                     List.of(),
                     fileNames

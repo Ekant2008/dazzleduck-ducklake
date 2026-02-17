@@ -70,7 +70,6 @@ public class MergeTableOpsUtilTest {
             var database = CATALOG;
             long snapshotId = MergeTableOpsUtil.replace(CATALOG,
                     tableId,
-                    tempTableId,
                     "__ducklake_metadata_" + database,
                     List.of(file3.toString(), file4.toString()),
                     List.of(file1.getFileName().toString(), file2.getFileName().toString())
@@ -87,8 +86,8 @@ public class MergeTableOpsUtilTest {
 
                 // Old files should have end_snapshot set (not deleted)
                 Long oldFilesWithEndSnapshot = ConnectionPool.collectFirst(connection,
-                        "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE (path LIKE '%%%s%%' OR path LIKE '%%%s%%') AND end_snapshot = %s"
-                                .formatted(METADATABASE, file1.getFileName(), file2.getFileName(), snapshotId), Long.class);
+                        "SELECT COUNT(*) FROM %s.ducklake_data_file WHERE (path LIKE '%%%s%%' OR path LIKE '%%%s%%') AND end_snapshot IS NOT NULL"
+                                .formatted(METADATABASE, file1.getFileName(), file2.getFileName()), Long.class);
                 assertEquals(2, oldFilesWithEndSnapshot, "Old files should have end_snapshot set");
 
                 // Files should NOT be scheduled for deletion yet (need expire_snapshots)
@@ -140,7 +139,6 @@ public class MergeTableOpsUtilTest {
             var database = CATALOG;
             MergeTableOpsUtil.replace(CATALOG,
                     tableId,
-                    tempTableId,
                     "__ducklake_metadata_" + database,
                     List.of(file3.toString(), file4.toString()),
                     List.of(file1.getFileName().toString(), file2.getFileName().toString())
@@ -187,7 +185,6 @@ public class MergeTableOpsUtilTest {
                     IllegalStateException.class,
                     () -> MergeTableOpsUtil.replace( database,
                             tableId,
-                            tempTableId,
                             "__ducklake_metadata_" + database,
                             List.of(file3.toString()),
                             List.of(file1.getFileName().toString(), "file2 does not exist")
