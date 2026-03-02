@@ -3,8 +3,10 @@ package io.dazzleduck.sql.ducklake;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -130,7 +132,7 @@ public class MergeTableOpsUtil {
             "CALL ducklake_add_data_files('%s', '%s', '%s', schema => 'main', ignore_extra_columns => true, allow_missing => true);";
 
     private static final String COPY_WITH_PARTITION_QUERY =
-            "COPY (SELECT * FROM read_parquet([%s])) TO '%s' (FORMAT PARQUET,%s RETURN_FILES);";
+            "COPY (%s) TO '%s' (FORMAT PARQUET,%s RETURN_FILES);";
 
     // =========================================================================
     // Public API
@@ -213,6 +215,10 @@ public class MergeTableOpsUtil {
      * Rewrites a set of Parquet files into a new layout, optionally repartitioning.
      * Does not update DuckLake metadata — pair with {@link #replace} to commit.
      *
+     * <p>This overload performs a plain {@code SELECT *} — no internal-column synthesis.
+     * Use {@link #rewriteWithPartitionNoCommit(List, String, List, String)} when compacting
+     * files that may lack {@code _ducklake_internal_row_id} / {@code _ducklake_internal_snapshot_id}.
+     *
      * @param inputFiles   source Parquet file paths
      * @param baseLocation destination directory (or file path when {@code partition} is empty)
      * @param partition    columns to partition by; empty list means no partitioning
@@ -221,12 +227,54 @@ public class MergeTableOpsUtil {
     public static List<String> rewriteWithPartitionNoCommit(List<String> inputFiles,
                                                             String baseLocation,
                                                             List<String> partition) throws SQLException {
+        return rewriteWithPartitionNoCommit(inputFiles, baseLocation, partition, null);
+    }
+
+    /**
+     * Rewrites a set of Parquet files into a new layout, optionally repartitioning,
+     * with automatic synthesis of missing DuckLake internal columns.
+     *
+     * <p>When {@code mdDatabase} is provided the method inspects each file's Parquet schema
+     * via {@code parquet_schema()} and classifies files into three groups:
+     * <ul>
+     *   <li><b>ALL</b> have {@code _ducklake_internal_*}: plain {@code SELECT *} passthrough.</li>
+     *   <li><b>NONE</b> have the columns: values are synthesised from {@code ducklake_data_file}
+     *       ({@code begin_snapshot} → snapshot ID, {@code row_id_start + file_row_number} → row ID).</li>
+     *   <li><b>MIXED</b>: files are unioned with {@code union_by_name=true}; existing values pass
+     *       through and missing values are filled via {@code COALESCE} from metadata.</li>
+     * </ul>
+     *
+     * <p>When {@code mdDatabase} is {@code null} the behaviour is identical to
+     * {@link #rewriteWithPartitionNoCommit(List, String, List)} (no synthesis).
+     *
+     * @param inputFiles   source Parquet file paths
+     * @param baseLocation destination directory (or file path when {@code partition} is empty)
+     * @param partition    columns to partition by; empty list means no partitioning
+     * @param mdDatabase   DuckLake metadata database name used to look up internal column values;
+     *                     {@code null} disables synthesis
+     * @return absolute paths of the newly written files
+     */
+    public static List<String> rewriteWithPartitionNoCommit(List<String> inputFiles,
+                                                            String baseLocation,
+                                                            List<String> partition,
+                                                            String mdDatabase) throws SQLException {
         if (inputFiles == null || inputFiles.isEmpty()) throw new IllegalArgumentException("inputFiles cannot be null or empty");
         if (baseLocation == null || baseLocation.isBlank()) throw new IllegalArgumentException("baseLocation cannot be null or blank");
         if (partition == null) throw new IllegalArgumentException("partition cannot be null");
         try (Connection conn = ConnectionPool.getConnection()) {
-            String sources = inputFiles.stream().map(s -> "'" + s + "'").collect(Collectors.joining(","));
-            return executeCopyAndCollectPaths(sources, baseLocation, partition, conn);
+            String sourceQuery;
+            if (mdDatabase != null) {
+                Set<String> withInternal = findFilesWithInternalColumns(conn, inputFiles);
+                List<String> without = inputFiles.stream().filter(f -> !withInternal.contains(f)).toList();
+                Map<String, FileInternalMeta> meta = without.isEmpty()
+                        ? Map.of()
+                        : fetchFileInternalMeta(conn, mdDatabase, without);
+                sourceQuery = buildSourceQuery(inputFiles, withInternal, meta);
+            } else {
+                sourceQuery = "SELECT * FROM read_parquet([%s])".formatted(
+                        inputFiles.stream().map(s -> "'" + escapeSql(s) + "'").collect(Collectors.joining(", ")));
+            }
+            return executeCopyAndCollectPaths(sourceQuery, baseLocation, partition, conn);
         }
     }
 
@@ -241,7 +289,8 @@ public class MergeTableOpsUtil {
         if (partition == null) throw new IllegalArgumentException("partition cannot be null");
         try (Connection conn = ConnectionPool.getConnection()) {
             String targetPath = baseLocation + Paths.get(inputFile).getFileName();
-            return executeCopyAndCollectPaths("'" + inputFile + "'", targetPath, partition, conn);
+            String sourceQuery = "SELECT * FROM read_parquet(['" + escapeSql(inputFile) + "'])";
+            return executeCopyAndCollectPaths(sourceQuery, targetPath, partition, conn);
         }
     }
 
@@ -531,8 +580,10 @@ public class MergeTableOpsUtil {
 
     /**
      * Runs a DuckDB COPY query and returns the written file paths reported by {@code RETURN_FILES}.
+     *
+     * @param sourceQuery a complete SQL SELECT expression used as the COPY source
      */
-    private static List<String> executeCopyAndCollectPaths(String sources,
+    private static List<String> executeCopyAndCollectPaths(String sourceQuery,
                                                            String baseLocation,
                                                            List<String> partition,
                                                            Connection conn) {
@@ -540,13 +591,119 @@ public class MergeTableOpsUtil {
             baseLocation = baseLocation.substring(0, baseLocation.length() - 1);
         }
         String partitionClause = partition.isEmpty() ? "" : "PARTITION_BY (" + String.join(", ", partition) + "),";
-        String copyQuery = COPY_WITH_PARTITION_QUERY.formatted(sources, baseLocation, partitionClause);
+        String copyQuery = COPY_WITH_PARTITION_QUERY.formatted(sourceQuery, baseLocation, partitionClause);
 
         List<String> files = new ArrayList<>();
         for (CopyResult r : ConnectionPool.collectAll(conn, copyQuery, CopyResult.class)) {
             files.addAll(Arrays.stream(r.files()).map(Object::toString).toList());
         }
         return files;
+    }
+
+    /**
+     * Returns the set of file paths (from {@code inputFiles}) that contain a
+     * {@code _ducklake_internal_row_id} column in their Parquet schema.
+     */
+    private static Set<String> findFilesWithInternalColumns(Connection conn,
+                                                            List<String> inputFiles) throws SQLException {
+        String fileList = inputFiles.stream()
+                .map(f -> "'" + escapeSql(f) + "'")
+                .collect(Collectors.joining(", "));
+        String query = "SELECT DISTINCT file_name FROM parquet_schema([%s]) WHERE name = '_ducklake_internal_row_id'"
+                .formatted(fileList);
+        Set<String> result = new HashSet<>();
+        ConnectionPool.collectFirstColumn(conn, query, String.class).forEach(result::add);
+        return result;
+    }
+
+    /**
+     * Fetches {@code begin_snapshot} and {@code row_id_start} from {@code ducklake_data_file}
+     * for each file in {@code filesWithout}, matched by filename (last path component).
+     *
+     * @param filesWithout absolute paths of files that lack internal columns
+     * @return map from bare filename to its metadata; never {@code null}
+     * @throws IllegalStateException if any file's metadata cannot be found
+     */
+    private static Map<String, FileInternalMeta> fetchFileInternalMeta(Connection conn,
+                                                                        String mdDatabase,
+                                                                        List<String> filesWithout) throws SQLException {
+        String quotedFilenames = filesWithout.stream()
+                .map(f -> "'" + escapeSql(Paths.get(f).getFileName().toString()) + "'")
+                .collect(Collectors.joining(", "));
+        String query = ("SELECT list_last(string_split(path, '/')), begin_snapshot, row_id_start "
+                + "FROM %s%sducklake_data_file "
+                + "WHERE list_last(string_split(path, '/')) IN (%s)")
+                .formatted(mdDatabase, MetadataConfig.q(), quotedFilenames);
+        Map<String, FileInternalMeta> result = new HashMap<>();
+        try (Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(query)) {
+            while (rs.next()) {
+                result.put(rs.getString(1), new FileInternalMeta(rs.getLong(2), rs.getLong(3)));
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Builds the SQL SELECT expression that will be used as the COPY source, handling
+     * three cases based on which files already carry DuckLake internal columns.
+     *
+     * <ul>
+     *   <li>ALL have internal columns → {@code SELECT * FROM read_parquet([...])}.</li>
+     *   <li>NONE have internal columns → synthesise from metadata via JOIN.</li>
+     *   <li>MIXED → {@code union_by_name=true} + COALESCE + LEFT JOIN.</li>
+     * </ul>
+     */
+    private static String buildSourceQuery(List<String> inputFiles,
+                                           Set<String> filesWithInternal,
+                                           Map<String, FileInternalMeta> metaForWithout) {
+        String quotedPaths = inputFiles.stream()
+                .map(f -> "'" + escapeSql(f) + "'")
+                .collect(Collectors.joining(", "));
+
+        if (filesWithInternal.size() == inputFiles.size()) {
+            // ALL case: every file already has internal columns — plain passthrough.
+            return "SELECT * FROM read_parquet([%s])".formatted(quotedPaths);
+        }
+
+        List<String> filesWithout = inputFiles.stream()
+                .filter(f -> !filesWithInternal.contains(f))
+                .toList();
+
+        String valuesClause = filesWithout.stream()
+                .map(f -> {
+                    String fname = Paths.get(f).getFileName().toString();
+                    FileInternalMeta m = metaForWithout.get(fname);
+                    if (m == null) {
+                        throw new IllegalStateException("No ducklake_data_file entry found for: " + f);
+                    }
+                    return "('%s', CAST(%d AS BIGINT), CAST(%d AS BIGINT))".formatted(
+                            escapeSql(fname), m.beginSnapshot(), m.rowIdStart());
+                })
+                .collect(Collectors.joining(", "));
+
+        if (filesWithInternal.isEmpty()) {
+            // NONE case: synthesise _ducklake_internal_* for every file from metadata.
+            return ("SELECT p.* EXCLUDE (filename, file_row_number), "
+                    + "m.begin_snapshot AS _ducklake_internal_snapshot_id, "
+                    + "(m.row_id_start + p.file_row_number)::BIGINT AS _ducklake_internal_row_id "
+                    + "FROM read_parquet([%s], filename=true, file_row_number=true) p "
+                    + "JOIN (VALUES %s) AS m(fname, begin_snapshot, row_id_start) "
+                    + "ON list_last(string_split(p.filename, '/')) = m.fname")
+                    .formatted(quotedPaths, valuesClause);
+        } else {
+            // MIXED case: pass through existing values, synthesise for files that lack them.
+            return ("SELECT p.* EXCLUDE (filename, file_row_number, "
+                    + "_ducklake_internal_snapshot_id, _ducklake_internal_row_id), "
+                    + "COALESCE(p._ducklake_internal_snapshot_id, m.begin_snapshot) "
+                    + "  AS _ducklake_internal_snapshot_id, "
+                    + "COALESCE(p._ducklake_internal_row_id, "
+                    + "  (m.row_id_start + p.file_row_number)::BIGINT) AS _ducklake_internal_row_id "
+                    + "FROM read_parquet([%s], union_by_name=true, filename=true, file_row_number=true) p "
+                    + "LEFT JOIN (VALUES %s) AS m(fname, begin_snapshot, row_id_start) "
+                    + "ON list_last(string_split(p.filename, '/')) = m.fname")
+                    .formatted(quotedPaths, valuesClause);
+        }
     }
 
     // =========================================================================
@@ -575,4 +732,7 @@ public class MergeTableOpsUtil {
     // =========================================================================
 
     public record TableInfo(String schemaName, String tableName) {}
+
+    /** Holds the DuckLake metadata needed to synthesise internal columns for a single data file. */
+    private record FileInternalMeta(long beginSnapshot, long rowIdStart) {}
 }

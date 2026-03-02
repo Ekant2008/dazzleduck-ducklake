@@ -666,4 +666,237 @@ public class MergeTableOpsUtilPostgresTest {
                     "All DuckDB-written files should be retired at the library snapshot");
         }
     }
+
+    /**
+     * NONE case: all input files are plain INSERT-generated files that lack
+     * {@code _ducklake_internal_row_id} / {@code _ducklake_internal_snapshot_id}.
+     * Verifies that {@code rewriteWithPartitionNoCommit} synthesises both columns
+     * correctly from {@code ducklake_data_file} metadata.
+     */
+    @Test
+    @Order(13)
+    void testRewriteSynthesisesInternalColumns_noneCase() throws Exception {
+        String tableName = "synthesis_none";
+
+        try (Connection conn = ConnectionPool.getConnection()) {
+            String[] setup = {
+                    "USE " + catalog,
+                    "CREATE TABLE %s (id INT, val VARCHAR)".formatted(tableName),
+                    "INSERT INTO %s VALUES (1, 'alpha')".formatted(tableName),
+                    "INSERT INTO %s VALUES (2, 'beta')".formatted(tableName)
+            };
+            ConnectionPool.executeBatchInTxn(conn, setup);
+
+            Long tableId = ConnectionPool.collectFirst(conn,
+                    "SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'".formatted(metadataDb, tableName),
+                    Long.class);
+            assertNotNull(tableId);
+
+            // DuckLake writes data files to DATA_PATH/main/<table>/; walk that directory for absolute paths
+            List<String> inputPaths = Files.walk(dataPath.resolve("main").resolve(tableName))
+                    .filter(p -> p.toString().endsWith(".parquet"))
+                    .map(Path::toString)
+                    .sorted()
+                    .toList();
+            assertFalse(inputPaths.isEmpty(), "Should have active DuckLake-managed files");
+
+            // Pre-condition: INSERT-generated files have no internal columns
+            String inList = inputPaths.stream().map(f -> "'" + f + "'").collect(Collectors.joining(", "));
+            Long internalInInput = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM parquet_schema([%s]) WHERE name = '_ducklake_internal_row_id'".formatted(inList),
+                    Long.class);
+            assertEquals(0L, internalInInput, "INSERT files must not have _ducklake_internal_row_id before synthesis");
+
+            // Rewrite with synthesis
+            Path outDir = dataPath.resolve("out_none");
+            List<String> outFiles = MergeTableOpsUtil.rewriteWithPartitionNoCommit(
+                    inputPaths, outDir.toString(), List.of(), metadataDb);
+            assertFalse(outFiles.isEmpty(), "Should produce output files");
+
+            String outList = outFiles.stream().map(f -> "'" + f + "'").collect(Collectors.joining(", "));
+
+            // Every output file must now carry the internal columns
+            Long filesWithCols = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(DISTINCT file_name) FROM parquet_schema([%s]) WHERE name = '_ducklake_internal_row_id'"
+                            .formatted(outList),
+                    Long.class);
+            assertEquals((long) outFiles.size(), filesWithCols, "Every output file must have _ducklake_internal_row_id");
+
+            // No NULLs in synthesised values
+            Long nullSnapshots = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM read_parquet([%s]) WHERE _ducklake_internal_snapshot_id IS NULL".formatted(outList),
+                    Long.class);
+            assertEquals(0L, nullSnapshots, "No row may have a NULL snapshot ID");
+
+            Long nullRowIds = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM read_parquet([%s]) WHERE _ducklake_internal_row_id IS NULL".formatted(outList),
+                    Long.class);
+            assertEquals(0L, nullRowIds, "No row may have a NULL row ID");
+
+            // Row IDs must be unique across all output rows
+            Long totalRows = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM read_parquet([%s])".formatted(outList), Long.class);
+            Long distinctRowIds = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(DISTINCT _ducklake_internal_row_id) FROM read_parquet([%s])".formatted(outList),
+                    Long.class);
+            assertEquals(totalRows, distinctRowIds, "Every output row must have a unique _ducklake_internal_row_id");
+            assertEquals(2L, totalRows, "Row count must be preserved");
+
+            // Snapshot IDs must match begin_snapshot values from the source input files
+            Long invalidSnapshots = ConnectionPool.collectFirst(conn,
+                    ("SELECT COUNT(*) FROM read_parquet([%s]) r "
+                     + "WHERE r._ducklake_internal_snapshot_id NOT IN ("
+                     + "  SELECT begin_snapshot FROM %s.ducklake_data_file "
+                     + "  WHERE table_id=%s AND end_snapshot IS NULL)")
+                            .formatted(outList, metadataDb, tableId),
+                    Long.class);
+            assertEquals(0L, invalidSnapshots, "Snapshot IDs must match begin_snapshot from ducklake_data_file");
+        }
+    }
+
+    /**
+     * ALL case: every input file already carries {@code _ducklake_internal_*} columns.
+     * Verifies that existing values pass through the rewrite unchanged.
+     */
+    @Test
+    @Order(14)
+    void testRewritePassesThroughInternalColumns_allCase() throws Exception {
+        try (Connection conn = ConnectionPool.getConnection()) {
+            // Create two Parquet files with hard-coded internal column values (not registered in DuckLake)
+            Path srcDir = dataPath.resolve("src_all");
+            Files.createDirectories(srcDir);
+            Path fileA = srcDir.resolve("wc_a.parquet");
+            Path fileB = srcDir.resolve("wc_b.parquet");
+
+            ConnectionPool.execute(conn,
+                    ("COPY (SELECT 1 AS id, 'x' AS val, "
+                     + "CAST(7 AS BIGINT) AS _ducklake_internal_snapshot_id, "
+                     + "CAST(100 AS BIGINT) AS _ducklake_internal_row_id) "
+                     + "TO '%s' (FORMAT PARQUET)").formatted(fileA));
+            ConnectionPool.execute(conn,
+                    ("COPY (SELECT 2 AS id, 'y' AS val, "
+                     + "CAST(7 AS BIGINT) AS _ducklake_internal_snapshot_id, "
+                     + "CAST(101 AS BIGINT) AS _ducklake_internal_row_id) "
+                     + "TO '%s' (FORMAT PARQUET)").formatted(fileB));
+
+            // Rewrite — ALL case: no metadata lookup required
+            Path outDir = dataPath.resolve("out_all");
+            List<String> outFiles = MergeTableOpsUtil.rewriteWithPartitionNoCommit(
+                    List.of(fileA.toString(), fileB.toString()), outDir.toString(), List.of(), metadataDb);
+            assertFalse(outFiles.isEmpty(), "Should produce output files");
+
+            String outList = outFiles.stream().map(f -> "'" + f + "'").collect(Collectors.joining(", "));
+
+            // Internal column values must be identical to the input
+            Long wrongSnapshot = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM read_parquet([%s]) WHERE _ducklake_internal_snapshot_id != 7".formatted(outList),
+                    Long.class);
+            assertEquals(0L, wrongSnapshot, "Snapshot IDs must pass through unchanged (expected 7)");
+
+            Long wrongRowId = ConnectionPool.collectFirst(conn,
+                    ("SELECT COUNT(*) FROM read_parquet([%s]) "
+                     + "WHERE _ducklake_internal_row_id NOT IN (100, 101)").formatted(outList),
+                    Long.class);
+            assertEquals(0L, wrongRowId, "Row IDs must pass through unchanged (expected 100 and 101)");
+
+            Long rowCount = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM read_parquet([%s])".formatted(outList), Long.class);
+            assertEquals(2L, rowCount, "Row count must be preserved");
+        }
+    }
+
+    /**
+     * MIXED case: some input files have {@code _ducklake_internal_*} columns, some do not.
+     * Verifies that existing values pass through and missing values are synthesised from metadata.
+     */
+    @Test
+    @Order(15)
+    void testRewriteHandlesMixedFiles_mixedCase() throws Exception {
+        String tableName = "synthesis_mixed";
+
+        try (Connection conn = ConnectionPool.getConnection()) {
+            // INSERT-generated DuckLake files — no internal columns, but registered in ducklake_data_file
+            String[] setup = {
+                    "USE " + catalog,
+                    "CREATE TABLE %s (id INT, val VARCHAR)".formatted(tableName),
+                    "INSERT INTO %s VALUES (10, 'ten')".formatted(tableName),
+                    "INSERT INTO %s VALUES (20, 'twenty')".formatted(tableName)
+            };
+            ConnectionPool.executeBatchInTxn(conn, setup);
+
+            Long tableId = ConnectionPool.collectFirst(conn,
+                    "SELECT table_id FROM %s.ducklake_table WHERE table_name='%s'".formatted(metadataDb, tableName),
+                    Long.class);
+            assertNotNull(tableId);
+
+            // DuckLake writes data files to DATA_PATH/main/<table>/; walk that directory for absolute paths
+            List<String> insertPaths = Files.walk(dataPath.resolve("main").resolve(tableName))
+                    .filter(p -> p.toString().endsWith(".parquet"))
+                    .map(Path::toString)
+                    .sorted()
+                    .toList();
+            assertFalse(insertPaths.isEmpty(), "Should have active DuckLake-managed files");
+
+            // Manually create an extra file that already has internal column values (not in DuckLake metadata)
+            Path extraDir = dataPath.resolve("extra_mixed");
+            Files.createDirectories(extraDir);
+            Path fileWithCols = extraDir.resolve("with_internal.parquet");
+            ConnectionPool.execute(conn,
+                    ("COPY (SELECT 99 AS id, 'existing' AS val, "
+                     + "CAST(42 AS BIGINT) AS _ducklake_internal_snapshot_id, "
+                     + "CAST(9999 AS BIGINT) AS _ducklake_internal_row_id) "
+                     + "TO '%s' (FORMAT PARQUET)").formatted(fileWithCols));
+
+            // Build mixed input: INSERT files (no internal cols) + manually created file (has internal cols)
+            List<String> mixedInput = new ArrayList<>(insertPaths);
+            mixedInput.add(fileWithCols.toString());
+
+            // Rewrite — MIXED case: synthesise for INSERT files, pass through for fileWithCols
+            Path outDir = dataPath.resolve("out_mixed");
+            List<String> outFiles = MergeTableOpsUtil.rewriteWithPartitionNoCommit(
+                    mixedInput, outDir.toString(), List.of(), metadataDb);
+            assertFalse(outFiles.isEmpty(), "Should produce output files");
+
+            String outList = outFiles.stream().map(f -> "'" + f + "'").collect(Collectors.joining(", "));
+
+            // All rows must have non-null internal columns
+            Long nullSnapshots = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM read_parquet([%s]) WHERE _ducklake_internal_snapshot_id IS NULL".formatted(outList),
+                    Long.class);
+            assertEquals(0L, nullSnapshots, "No row may have a NULL snapshot ID");
+
+            Long nullRowIds = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM read_parquet([%s]) WHERE _ducklake_internal_row_id IS NULL".formatted(outList),
+                    Long.class);
+            assertEquals(0L, nullRowIds, "No row may have a NULL row ID");
+
+            // The pre-existing row (id=99) must keep its original internal column values unchanged
+            Long preservedRow = ConnectionPool.collectFirst(conn,
+                    ("SELECT COUNT(*) FROM read_parquet([%s]) "
+                     + "WHERE id=99 AND _ducklake_internal_snapshot_id=42 AND _ducklake_internal_row_id=9999")
+                            .formatted(outList),
+                    Long.class);
+            assertEquals(1L, preservedRow, "Pre-existing internal column values must pass through unchanged");
+
+            // INSERT rows must have synthesised snapshot IDs from ducklake_data_file
+            Long invalidSnapshots = ConnectionPool.collectFirst(conn,
+                    ("SELECT COUNT(*) FROM read_parquet([%s]) r "
+                     + "WHERE id != 99 "
+                     + "AND r._ducklake_internal_snapshot_id NOT IN ("
+                     + "  SELECT begin_snapshot FROM %s.ducklake_data_file "
+                     + "  WHERE table_id=%s AND end_snapshot IS NULL)")
+                            .formatted(outList, metadataDb, tableId),
+                    Long.class);
+            assertEquals(0L, invalidSnapshots, "INSERT rows must have synthesised snapshot IDs from metadata");
+
+            // Row IDs must be globally unique across all output rows
+            Long totalRows = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(*) FROM read_parquet([%s])".formatted(outList), Long.class);
+            Long distinctRowIds = ConnectionPool.collectFirst(conn,
+                    "SELECT COUNT(DISTINCT _ducklake_internal_row_id) FROM read_parquet([%s])".formatted(outList),
+                    Long.class);
+            assertEquals(totalRows, distinctRowIds, "Every output row must have a unique _ducklake_internal_row_id");
+            assertEquals(3L, totalRows, "Row count must be preserved (2 INSERT rows + 1 pre-existing row)");
+        }
+    }
 }

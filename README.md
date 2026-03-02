@@ -16,7 +16,7 @@ Java utilities for managing DuckLake table compaction and file replacement. The 
 <dependency>
     <groupId>io.dazzleduckl.sql</groupId>
     <artifactId>ducklake</artifactId>
-    <version>0.0.14</version>
+    <version>0.0.15</version>
 </dependency>
 ```
 
