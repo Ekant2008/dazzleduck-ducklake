@@ -16,7 +16,7 @@
         <testcontainers.version>1.21.4</testcontainers.version>
         <aws-sdk.version>2.20.160</aws-sdk.version>
         <jackson.version>2.15.3</jackson.version>
-        <dazzleduck.version>0.0.26</dazzleduck.version>
+        <dazzleduck.version>0.0.30</dazzleduck.version>
     </properties>
 
     <dependencyManagement>
